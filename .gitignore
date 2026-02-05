@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Firebase CLI / scripts output
+.firebase-state.json
+.firebase-deployment-report.md
+
+# Logs and OS
+logs
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Build / coverage (if added later)
+dist
+coverage
+.nyc_output

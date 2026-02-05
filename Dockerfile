@@ -4,7 +4,7 @@ FROM node:20-alpine AS dependencies
 WORKDIR /app
 
 # Copy package files
-COPY backend/package*.json ./
+COPY package*.json ./
 
 # Install production dependencies
 RUN npm ci --omit=dev
@@ -18,7 +18,7 @@ WORKDIR /app
 COPY --from=dependencies /app/node_modules ./node_modules
 
 # Copy source code
-COPY backend/ ./
+COPY . ./
 
 # Create non-root user
 RUN addgroup -S appuser && \
