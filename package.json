@@ -1,0 +1,37 @@
+{
+  "name": "@campusconnect/backend",
+  "version": "1.0.0",
+  "description": "CampusConnect Express.js API Server",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "repair-roles": "node scripts/repairRoles.js",
+    "reset-admin-passwords": "node scripts/resetAdminPasswords.js",
+    "ensure-test-admins": "node scripts/ensureTestAdmins.js",
+    "firebase:check": "node scripts/check-firebase-state.js",
+    "firebase:deploy": "firebase deploy",
+    "firebase:deploy:rules": "firebase deploy --only firestore:rules",
+    "firebase:deploy:indexes": "firebase deploy --only firestore:indexes"
+  },
+  "keywords": [
+    "express",
+    "api",
+    "campusconnect"
+  ],
+  "author": "Steve Braown",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.6.0",
+    "jsonwebtoken": "^9.0.3",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

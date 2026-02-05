@@ -1,0 +1,328 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============ HELPER FUNCTIONS ============
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user is admin (check in admins collection)
+    function isAdmin() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    
+    // Check if user owns the resource
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // ============ ADMINS COLLECTION SCHEMA VALIDATION ============
+    
+    // Validate admins/{uid} document structure
+    function isValidAdminDoc(data) {
+      // Required fields validation
+      return data.keys().hasAll(['uid', 'email', 'name', 'createdAt']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.email.matches('[^@]+@[^@]+') &&
+             data.name is string &&
+             data.createdAt is timestamp &&
+             // Optional fields (if present, validate type)
+             (!('disabled' in data) || data.disabled is bool) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+             // No forbidden fields (admins don't have these)
+             !('role' in data) &&
+             !('isAdmin' in data) &&
+             !('tenantId' in data) &&
+             !('avatarUrl' in data) &&
+             !('bio' in data) &&
+             !('major' in data) &&
+             !('degree' in data) &&
+             !('year' in data) &&
+             !('interests' in data) &&
+             !('locationEnabled' in data) &&
+             !('locationLat' in data) &&
+             !('locationLng' in data);
+    }
+
+    // ============ USERS COLLECTION SCHEMA VALIDATION ============
+    
+    // Validate users/{uid} document structure  
+    function isValidUserDoc(data) {
+      // Required fields validation
+      return data.keys().hasAll(['uid', 'email', 'tenantId', 'name', 'createdAt']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.email.matches('[^@]+@[^@]+') &&
+             data.tenantId is string &&
+             data.name is string &&
+             data.createdAt is timestamp &&
+             // Optional fields (if present, validate type)
+             (!('avatarUrl' in data) || data.avatarUrl is string) &&
+             (!('disabled' in data) || data.disabled is bool) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+             (!('role' in data) || data.role in ['user', 'staff']) &&
+             // No forbidden fields
+             !('isAdmin' in data) &&
+             !('bio' in data) &&
+             !('major' in data) &&
+             !('degree' in data) &&
+             !('year' in data) &&
+             !('interests' in data);
+    }
+
+    // ============ PROFILES COLLECTION SCHEMA VALIDATION ============
+    
+    // Validate profiles/{uid} document structure
+    function isValidProfileDoc(data) {
+      // Required fields
+      return data.keys().hasAll(['uid', 'displayName', 'degree', 'year']) &&
+             data.uid is string &&
+             data.displayName is string &&
+             data.degree is string &&
+             data.year is string &&
+             // Optional fields validation
+             (!('bio' in data) || data.bio is string) &&
+             (!('interests' in data) || data.interests is list) &&
+             (!('locationEnabled' in data) || data.locationEnabled is bool) &&
+             (!('locationLat' in data) || (data.locationLat == null || (data.locationLat is number && data.locationLat >= -90 && data.locationLat <= 90))) &&
+             (!('locationLng' in data) || (data.locationLng == null || (data.locationLng is number && data.locationLng >= -180 && data.locationLng <= 180))) &&
+             (!('locationUpdatedAt' in data) || (data.locationUpdatedAt == null || data.locationUpdatedAt is timestamp)) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+             (!('disabled' in data) || data.disabled is bool) &&
+             // No forbidden fields (profiles don't have these)
+             !('email' in data) &&
+             !('tenantId' in data) &&
+             !('role' in data) &&
+             !('isAdmin' in data) &&
+             !('avatarUrl' in data) &&
+             !('name' in data) &&
+             !('major' in data);
+    }
+
+    // ============ ADMINS COLLECTION ============
+    match /admins/{adminId} {
+      // Only admins can read admin documents
+      allow read: if isAdmin();
+      
+      // Only admins can create/update admin documents (must be valid schema)
+      allow create, update: if isAdmin() && isValidAdminDoc(request.resource.data);
+      
+      // Only admins can delete admin documents (self-deletion blocked by backend)
+      allow delete: if isAdmin();
+    }
+
+    // ============ USERS COLLECTION ============
+    match /users/{userId} {
+      // Users can read their own document
+      allow read: if isOwner(userId);
+      // Admins can read all users
+      allow read: if isAdmin();
+      
+      // Users can update their own document (admin-only fields blocked by backend)
+      allow update: if isOwner(userId) && isValidUserDoc(request.resource.data);
+      
+      // Admins can create and update users (must be valid schema)
+      allow create, update: if isAdmin() && isValidUserDoc(request.resource.data);
+      
+      // Only admins can delete users
+      allow delete: if isAdmin();
+    }
+
+    // ============ PROFILES COLLECTION ============
+    match /profiles/{userId} {
+      // Profiles are publicly readable (for directory, matching, etc.)
+      allow read: if true;
+      
+      // Users can update their own profile
+      allow update: if isOwner(userId) && isValidProfileDoc(request.resource.data);
+      
+      // Admins can create and update any profile (must be valid schema)
+      allow create, update: if isAdmin() && isValidProfileDoc(request.resource.data);
+      
+      // Only admins can delete profiles
+      allow delete: if isAdmin();
+    }
+
+    // ============ GROUPS COLLECTION ============
+    match /groups/{groupId} {
+      // Anyone authenticated can read approved groups
+      allow read: if isAuthenticated() && resource.data.status == 'approved';
+      // Users can read their own pending/rejected groups
+      allow read: if isAuthenticated() && resource.data.createdBy == request.auth.uid;
+      // Admins can read all groups
+      allow read: if isAdmin();
+      
+      // Authenticated users can create groups (status will be set to 'pending' for students)
+      allow create: if isAuthenticated() && 
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.status in ['pending', 'approved'];
+      
+      // Only admins can update groups (for approval/rejection, or creators can update their own pending)
+      allow update: if isAdmin() ||
+        (isAuthenticated() && 
+         resource.data.createdBy == request.auth.uid &&
+         resource.data.status == 'pending' &&
+         request.resource.data.status == 'pending'); // Can't self-approve
+      
+      // Only admins can delete groups
+      allow delete: if isAdmin();
+      
+      // Allow users to join/leave (update members array)
+      // This is handled via backend API, but rules allow it if members field changes
+      allow update: if isAuthenticated() && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'membersCount', 'updatedAt']);
+    }
+
+    // ============ EVENTS COLLECTION ============
+    match /events/{eventId} {
+      // Anyone authenticated can read approved events
+      allow read: if isAuthenticated() && resource.data.status == 'approved';
+      // Users can read their own pending/rejected events
+      allow read: if isAuthenticated() && resource.data.createdBy == request.auth.uid;
+      // Admins can read all events
+      allow read: if isAdmin();
+      
+      // Authenticated users can create events (status will be set to 'pending' for students)
+      allow create: if isAuthenticated() && 
+        request.resource.data.createdBy == request.auth.uid &&
+        request.resource.data.status in ['pending', 'approved'];
+      
+      // Only admins can update events (for approval/rejection)
+      allow update: if isAdmin() ||
+        (isAuthenticated() && 
+         resource.data.createdBy == request.auth.uid &&
+         resource.data.status == 'pending' &&
+         request.resource.data.status == 'pending'); // Can't self-approve
+      
+      // Only admins can delete events
+      allow delete: if isAdmin();
+      
+      // Allow users to RSVP/withdraw (update attendees array)
+      allow update: if isAuthenticated() && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['attendees', 'attendeesCount', 'updatedAt']);
+    }
+
+    // ============ CONNECTIONS COLLECTION ============
+    match /connections/{connectionId} {
+      // Users can read connections they're part of
+      allow read: if isAuthenticated() && 
+        (request.auth.uid == resource.data.fromUserId || 
+         request.auth.uid == resource.data.toUserId);
+      // Admins can read all connections
+      allow read: if isAdmin();
+      
+      // Users can create connection requests (fromUserId must match)
+      allow create: if isAuthenticated() && 
+        request.resource.data.fromUserId == request.auth.uid;
+      
+      // Users can update connections they're part of (for accept/reject)
+      allow update: if isAuthenticated() && 
+        (request.auth.uid == resource.data.fromUserId || 
+         request.auth.uid == resource.data.toUserId);
+      // Admins can update any connection
+      allow update: if isAdmin();
+      
+      // Only admins can delete connections
+      allow delete: if isAdmin();
+    }
+
+    // ============ MATCHES COLLECTION ============
+    match /matches/{matchId} {
+      // Users can read matches they're part of
+      allow read: if isAuthenticated() && 
+        request.auth.uid in resource.data.users;
+      // Admins can read all matches
+      allow read: if isAdmin();
+      
+      // Users can create matches (must include themselves)
+      allow create: if isAuthenticated() && 
+        request.auth.uid in request.resource.data.users;
+      
+      // Only admins can update/delete matches
+      allow update, delete: if isAdmin();
+    }
+
+    // ============ HELPCATEGORIES COLLECTION ============
+    match /helpCategories/{categoryId} {
+      // Authenticated users can read all help categories
+      allow read: if isAuthenticated();
+      // Only admins can write help categories
+      allow write: if isAdmin();
+    }
+
+    // ============ HELPJOURNEYS COLLECTION ============
+    match /helpJourneys/{journeyId} {
+      // Users can create their own journey events
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid;
+      
+      // Users can read their own journey events
+      allow read: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+      
+      // Admins can read all journey events (for analytics)
+      allow read: if isAdmin();
+      
+      // No one can update/delete journey events (immutable logs)
+      allow update, delete: if false;
+    }
+
+    // ============ DELETION_REQUESTS COLLECTION ============
+    match /deletion_requests/{uid} {
+      // Users can read their own deletion requests
+      allow read: if isOwner(uid);
+      
+      // Admins can read all deletion requests
+      allow read: if isAdmin();
+      
+      // Users can create their own deletion request
+      allow create: if isOwner(uid) && 
+        request.resource.data.uid == uid &&
+        request.resource.data.status == 'pending';
+      
+      // Only admins can update deletion requests (approve/reject)
+      allow update: if isAdmin();
+      
+      // Only admins can delete deletion requests
+      allow delete: if isAdmin();
+    }
+
+    // ============ ADMIN COLLECTION ============
+    match /admin/{document=**} {
+      // Only admins can read/write admin settings
+      allow read, write: if isAdmin();
+    }
+
+    // ============ POSTS COLLECTION (Optional - for future content) ============
+    match /posts/{postId} {
+      // Anyone authenticated can read published posts
+      allow read: if isAuthenticated() && resource.data.status == 'published';
+      // Authors can read their own posts
+      allow read: if isAuthenticated() && resource.data.authorId == request.auth.uid;
+      // Admins can read all posts
+      allow read: if isAdmin();
+      
+      // Authors can create posts
+      allow create: if isAuthenticated() && 
+        request.resource.data.authorId == request.auth.uid;
+      
+      // Authors can update their own posts, admins can update any
+      allow update: if isAuthenticated() && 
+        (resource.data.authorId == request.auth.uid || isAdmin());
+      
+      // Only admins can delete posts
+      allow delete: if isAdmin();
+    }
+
+    // Default deny all other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
