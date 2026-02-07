@@ -4,6 +4,20 @@
  */
 
 /**
+ * Validate latitude/longitude coordinates
+ * @param {number} lat - Latitude
+ * @param {number} lng - Longitude
+ * @returns {boolean} - True if valid (numbers, finite, within range; excludes 0,0)
+ */
+export const isValidCoordinate = (lat, lng) => {
+  if (typeof lat !== 'number' || typeof lng !== 'number') return false;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
+  if (lat === 0 && lng === 0) return false;
+  return true;
+};
+
+/**
  * Calculate distance between two GPS coordinates using Haversine formula
  * @param {number} lat1 - Latitude of first point
  * @param {number} lon1 - Longitude of first point

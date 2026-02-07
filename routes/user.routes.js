@@ -3,7 +3,7 @@ import express from 'express';
 import geohash from 'ngeohash';
 import { firestore } from '../config/firebaseAdmin.js';
 import { requireAuth, requireOwnership } from '../middleware/auth.js';
-import { haversineDistance, pointInsideGeofence as checkPointInsideGeofence } from '../utils/geo.js';
+import { haversineDistance, pointInsideGeofence as checkPointInsideGeofence, isValidCoordinate } from '../utils/geo.js';
 
 const router = express.Router();
 const profilesRef = firestore.collection('profiles');
@@ -235,13 +235,10 @@ router.patch('/:id/location', requireAuth, requireOwnership('id'), async (req, r
     const latNum = typeof lat === 'number' ? lat : (typeof lat === 'string' ? parseFloat(lat) : null);
     const lngNum = typeof lng === 'number' ? lng : (typeof lng === 'string' ? parseFloat(lng) : null);
 
-    // Validate that we have valid numbers
-    if (latNum === null || lngNum === null || isNaN(latNum) || isNaN(lngNum)) {
-      console.error('❌ Location update validation failed:', { 
-        received: { lat, lng, latType: typeof lat, lngType: typeof lng },
-        parsed: { latNum, lngNum },
-      });
-      return res.status(400).json({ error: 'Provide valid lat/lng as numbers' });
+    // Validate coordinates (finite, -90<=lat<=90, -180<=lng<=180, exclude 0,0)
+    if (!isValidCoordinate(latNum, lngNum)) {
+      console.error('❌ Invalid coordinates:', { lat, lng, latNum, lngNum });
+      return res.status(400).json({ error: 'Invalid coordinates' });
     }
 
     const coords = { lat: latNum, lng: lngNum };
