@@ -44,6 +44,32 @@ router.post('/request', requireAuth, async (req, res) => {
     };
 
     await docRef.set(payload);
+
+    // Emit real-time notification to recipient (JWT-derived identities only)
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const [profileSnap, userSnap] = await Promise.all([
+        profilesRef.doc(fromUserId).get(),
+        usersRef.doc(fromUserId).get(),
+      ]);
+      const profileData = profileSnap?.exists ? profileSnap.data() : {};
+      const userData = userSnap?.exists ? userSnap.data() : {};
+      const fromName = profileData.name || profileData.displayName || userData.name || userData.email || 'Unknown';
+
+      const sids = io.userSockets.get(toUserId);
+      if (sids && sids.size > 0) {
+        const eventPayload = {
+          requestId: connectionId,
+          fromUserId,
+          fromName,
+          createdAt: now,
+        };
+        for (const sid of sids) {
+          io.to(sid).emit('connection:request-received', eventPayload);
+        }
+      }
+    }
+
     return res.json({ success: true, connectionId, status: CONNECTION_STATUS.PENDING });
   } catch (err) {
     console.error('Send request error:', err);
@@ -158,6 +184,35 @@ router.patch('/:id/accept', requireAuth, async (req, res) => {
       acceptedAt: now,
       updatedAt: now,
     });
+
+    // Emit real-time notification to both users (JWT-derived identities only)
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const [profileSnap, userSnap] = await Promise.all([
+        profilesRef.doc(otherUserId).get(),
+        usersRef.doc(otherUserId).get(),
+      ]);
+      const profileData = profileSnap?.exists ? profileSnap.data() : {};
+      const userData = userSnap?.exists ? userSnap.data() : {};
+      const otherUserName = profileData.name || profileData.displayName || userData.name || userData.email || 'Unknown';
+
+      const payloadA = { connectionId, otherUserId, otherUserName };
+      const [accepterProfileSnap, accepterUserSnap] = await Promise.all([
+        profilesRef.doc(uid).get(),
+        usersRef.doc(uid).get(),
+      ]);
+      const accepterProfile = accepterProfileSnap?.exists ? accepterProfileSnap.data() : {};
+      const accepterUser = accepterUserSnap?.exists ? accepterUserSnap.data() : {};
+      const accepterName = accepterProfile.name || accepterProfile.displayName || accepterUser.name || accepterUser.email || 'Unknown';
+      const payloadBCorrect = { connectionId, otherUserId: uid, otherUserName: accepterName };
+
+      for (const sid of io.userSockets.get(uid) || []) {
+        io.to(sid).emit('connection:accepted', payloadA);
+      }
+      for (const sid of io.userSockets.get(otherUserId) || []) {
+        io.to(sid).emit('connection:accepted', payloadBCorrect);
+      }
+    }
 
     // Create or ensure thread exists
     const threadRef = threadsRef.doc(threadId);
