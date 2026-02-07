@@ -359,18 +359,37 @@ router.patch('/:id/location', requireAuth, requireOwnership('id'), async (req, r
           userId: otherUserId,
           distanceMeters: dist,
           commonInterests,
+          otherProfile,
         });
       }
     }
 
     // Emit proximity suggestions via Socket.io (if connected)
+    // Build profiles map for display names (no bare UIDs in toast)
+    const buildProfilesMap = (uid, profileData) => {
+      if (!profileData) return {};
+      return {
+        [uid]: {
+          displayName: profileData.displayName || null,
+          major: profileData.major || null,
+          photoURL: profileData.avatarUrl || profileData.photoURL || null,
+        },
+      };
+    };
+
     if (io && suggestions.length > 0) {
       for (const suggestion of suggestions) {
+        const otherProfile = suggestion.otherProfile || {};
+        const profiles = {
+          ...buildProfilesMap(userId, currentProfile),
+          ...buildProfilesMap(suggestion.userId, otherProfile),
+        };
         const payload = {
           users: [userId, suggestion.userId],
           distanceMeters: suggestion.distanceMeters,
           commonInterests: suggestion.commonInterests,
           timestamp: new Date().toISOString(),
+          profiles,
         };
         const map = io.userSockets;
         const uSet = map?.get(userId);
