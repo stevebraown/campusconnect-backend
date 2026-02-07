@@ -1,5 +1,6 @@
 // User profile and directory routes
 import express from 'express';
+import geohash from 'ngeohash';
 import { firestore } from '../config/firebaseAdmin.js';
 import { requireAuth, requireOwnership } from '../middleware/auth.js';
 import { haversineDistance, pointInsideGeofence as checkPointInsideGeofence } from '../utils/geo.js';
@@ -89,6 +90,75 @@ router.get('/me', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Get me error:', err);
     return res.status(500).json({ success: false, error: 'Failed to load profile' });
+  }
+});
+
+// Get current user settings (notifications, privacy)
+router.get('/me/settings', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const profileSnap = await profilesRef.doc(uid).get();
+    const data = profileSnap.exists ? profileSnap.data() : {};
+    const settings = data.settings || {};
+    const notifications = {
+      email: settings.notifications?.email ?? true,
+      push: settings.notifications?.push ?? false,
+      matches: settings.notifications?.matches ?? true,
+      connections: settings.notifications?.connections ?? true,
+    };
+    const privacy = {
+      profileVisible: settings.privacy?.profileVisible ?? true,
+      showLocation: settings.privacy?.showLocation ?? false,
+      showEmail: settings.privacy?.showEmail ?? false,
+    };
+    return res.json({
+      success: true,
+      settings: { notifications, privacy },
+    });
+  } catch (err) {
+    console.error('Get settings error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to load settings' });
+  }
+});
+
+// Update current user settings (notifications, privacy)
+router.patch('/me/settings', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const { notifications, privacy } = req.body || {};
+    const profileSnap = await profilesRef.doc(uid).get();
+    const existing = profileSnap.exists ? profileSnap.data() : {};
+    const existingSettings = existing.settings || {};
+    const existingNotif = existingSettings.notifications || {};
+    const existingPriv = existingSettings.privacy || {};
+    const newSettings = { ...existingSettings };
+
+    if (typeof notifications === 'object') {
+      newSettings.notifications = {
+        email: typeof notifications.email === 'boolean' ? notifications.email : (existingNotif.email ?? true),
+        push: typeof notifications.push === 'boolean' ? notifications.push : (existingNotif.push ?? false),
+        matches: typeof notifications.matches === 'boolean' ? notifications.matches : (existingNotif.matches ?? true),
+        connections: typeof notifications.connections === 'boolean' ? notifications.connections : (existingNotif.connections ?? true),
+      };
+    }
+    if (typeof privacy === 'object') {
+      newSettings.privacy = {
+        profileVisible: typeof privacy.profileVisible === 'boolean' ? privacy.profileVisible : (existingPriv.profileVisible ?? true),
+        showLocation: typeof privacy.showLocation === 'boolean' ? privacy.showLocation : (existingPriv.showLocation ?? false),
+        showEmail: typeof privacy.showEmail === 'boolean' ? privacy.showEmail : (existingPriv.showEmail ?? false),
+      };
+    }
+    if (typeof notifications !== 'object' && typeof privacy !== 'object') {
+      return res.status(400).json({ error: 'Provide notifications and/or privacy object' });
+    }
+    await profilesRef.doc(uid).set({ settings: newSettings, updatedAt: new Date().toISOString() }, { merge: true });
+    return res.json({
+      success: true,
+      settings: { notifications: newSettings.notifications || {}, privacy: newSettings.privacy || {} },
+    });
+  } catch (err) {
+    console.error('Update settings error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update settings' });
   }
 });
 
@@ -191,11 +261,13 @@ router.patch('/:id/location', requireAuth, requireOwnership('id'), async (req, r
       console.log('📍 Geofencing disabled - allowing location update');
     }
 
+    const geohashStr = geohash.encode(coords.lat, coords.lng, 6);
     const update = {
       locationLat: coords.lat,
       locationLng: coords.lng,
       locationText: '',
       locationUpdatedAt: new Date().toISOString(),
+      geohash: geohashStr,
     };
 
     await profilesRef.doc(userId).set(update, { merge: true });
@@ -220,64 +292,75 @@ router.patch('/:id/location', requireAuth, requireOwnership('id'), async (req, r
     const now = Date.now();
     const io = req.app.get('io');
 
-    // Get all profiles with recent locations (within geofence)
-    const allProfilesSnap = await profilesRef.get();
+    // Query nearby profiles via geohash index (center + 8 neighbors for 100m coverage)
+    const centerHash = geohash.encode(coords.lat, coords.lng, 6);
+    const nearbyHashes = [centerHash, ...geohash.neighbors(centerHash)];
     const suggestions = [];
 
-    for (const doc of allProfilesSnap.docs) {
-      const otherUserId = doc.id;
-      if (otherUserId === userId) continue;
+    const candidateSnaps = await Promise.all(
+      nearbyHashes.map((h) =>
+        profilesRef
+          .where('locationEnabled', '==', true)
+          .where('geohash', '==', h)
+          .get()
+      )
+    );
 
-      const otherProfile = doc.data();
+    const seenIds = new Set([userId]);
+    for (const snap of candidateSnaps) {
+      for (const doc of snap.docs) {
+        const otherUserId = doc.id;
+        if (seenIds.has(otherUserId)) continue;
+        seenIds.add(otherUserId);
 
-      // Check 1: locationEnabled must be true for both users
-      if (otherProfile.locationEnabled !== true) continue;
+        const otherProfile = doc.data();
 
-      // Check 2: Must have valid location data
-      if (
-        typeof otherProfile.locationLat !== 'number' ||
-        typeof otherProfile.locationLng !== 'number' ||
-        !otherProfile.locationUpdatedAt
-      ) {
-        continue;
+        // Check 1: Must have valid location data
+        if (
+          typeof otherProfile.locationLat !== 'number' ||
+          typeof otherProfile.locationLng !== 'number' ||
+          !otherProfile.locationUpdatedAt
+        ) {
+          continue;
+        }
+
+        // Check 2: Location must be recent (within 5 minutes)
+        const otherTs = new Date(otherProfile.locationUpdatedAt).getTime();
+        if (Number.isNaN(otherTs) || now - otherTs > recentThresholdMs) continue;
+
+        // Check 3: Other user must be inside geofence
+        const otherInside = await pointInsideGeofence(otherProfile.locationLat, otherProfile.locationLng);
+        if (!otherInside) continue;
+
+        // Check 4: Distance must be < 100m
+        const dist = haversineDistance(
+          coords.lat,
+          coords.lng,
+          otherProfile.locationLat,
+          otherProfile.locationLng,
+          'm'
+        );
+
+        if (dist >= 100) continue; // Must be < 100m
+
+        // Check 5: Matching programme (major)
+        const currentMajor = (currentProfile.major || '').toLowerCase().trim();
+        const otherMajor = (otherProfile.major || '').toLowerCase().trim();
+        if (!currentMajor || !otherMajor || currentMajor !== otherMajor) continue;
+
+        // Check 6: Overlapping interests
+        const currentInterests = Array.isArray(currentProfile.interests) ? currentProfile.interests.map(i => (i || '').toLowerCase().trim()).filter(Boolean) : [];
+        const otherInterests = Array.isArray(otherProfile.interests) ? otherProfile.interests.map(i => (i || '').toLowerCase().trim()).filter(Boolean) : [];
+        const commonInterests = currentInterests.filter(i => otherInterests.includes(i));
+        if (commonInterests.length === 0) continue;
+
+        // All criteria met - this is a valid proximity suggestion
+        suggestions.push({
+          userId: otherUserId,
+          distanceMeters: dist,
+          commonInterests,
+        });
       }
-
-      // Check 3: Location must be recent (within 5 minutes)
-      const otherTs = new Date(otherProfile.locationUpdatedAt).getTime();
-      if (Number.isNaN(otherTs) || now - otherTs > recentThresholdMs) continue;
-
-      // Check 4: Other user must be inside geofence
-      const otherInside = await pointInsideGeofence(otherProfile.locationLat, otherProfile.locationLng);
-      if (!otherInside) continue;
-
-      // Check 5: Distance must be < 100m
-      const dist = haversineDistance(
-        coords.lat,
-        coords.lng,
-        otherProfile.locationLat,
-        otherProfile.locationLng,
-        'm'
-      );
-
-      if (dist >= 100) continue; // Must be < 100m
-
-      // Check 6: Matching programme (major)
-      const currentMajor = (currentProfile.major || '').toLowerCase().trim();
-      const otherMajor = (otherProfile.major || '').toLowerCase().trim();
-      if (!currentMajor || !otherMajor || currentMajor !== otherMajor) continue;
-
-      // Check 7: Overlapping interests
-      const currentInterests = Array.isArray(currentProfile.interests) ? currentProfile.interests.map(i => (i || '').toLowerCase().trim()).filter(Boolean) : [];
-      const otherInterests = Array.isArray(otherProfile.interests) ? otherProfile.interests.map(i => (i || '').toLowerCase().trim()).filter(Boolean) : [];
-      const commonInterests = currentInterests.filter(i => otherInterests.includes(i));
-      if (commonInterests.length === 0) continue;
-
-      // All criteria met - this is a valid proximity suggestion
-      suggestions.push({
-        userId: otherUserId,
-        distanceMeters: dist,
-        commonInterests,
-      });
     }
 
     // Emit proximity suggestions via Socket.io (if connected)

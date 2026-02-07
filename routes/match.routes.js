@@ -116,6 +116,25 @@ router.post('/confirm', requireAuth, async (req, res) => {
       { merge: true }
     );
 
+    // Emit socket notification to both users (if connected)
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const payload = {
+        matchId,
+        matchedWith: null,
+        message: 'You have a new match!',
+      };
+      for (const targetUid of [uid, userId]) {
+        const sids = io.userSockets.get(targetUid);
+        if (sids && sids.size > 0) {
+          payload.matchedWith = targetUid === uid ? userId : uid;
+          for (const sid of sids) {
+            io.to(sid).emit('match:notification', payload);
+          }
+        }
+      }
+    }
+
     return res.json({ success: true, matchId });
   } catch (err) {
     console.error('Confirm match error:', err);

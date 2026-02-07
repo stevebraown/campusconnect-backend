@@ -100,10 +100,26 @@ router.get('/list', requireAuth, async (req, res) => {
       connectionsRef.where('toUserId', '==', uid).where('status', '==', CONNECTION_STATUS.ACCEPTED).get(),
     ]);
 
-    const connections = [
+    const raw = [
       ...fromSnap.docs.map((d) => ({ id: d.id, ...d.data(), connectedUserId: d.data().toUserId })),
       ...toSnap.docs.map((d) => ({ id: d.id, ...d.data(), connectedUserId: d.data().fromUserId })),
     ];
+
+    // Enrich with profile display names for chat UI
+    const connections = await Promise.all(
+      raw.map(async (c) => {
+        const otherId = c.connectedUserId;
+        if (!otherId) return c;
+        const profileSnap = await profilesRef.doc(otherId).get();
+        const profile = profileSnap.exists ? profileSnap.data() : {};
+        const userSnap = await usersRef.doc(otherId).get();
+        const userData = userSnap.exists ? userSnap.data() : {};
+        return {
+          ...c,
+          connectedUserName: profile.displayName || profile.name || userData.name || userData.email || otherId.slice(0, 8),
+        };
+      })
+    );
 
     return res.json({ success: true, connections });
   } catch (err) {

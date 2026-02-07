@@ -299,6 +299,18 @@ service cloud.firestore {
       allow read, write: if isAdmin();
     }
 
+    // ============ CONVERSATIONS COLLECTION (Chat) ============
+    match /conversations/{conversationId} {
+      // Users can read conversations they participate in (enforced by backend API)
+      allow read, write: if false;  // Backend only - all access via API with auth
+    }
+
+    // ============ MESSAGES COLLECTION (Chat) ============
+    match /messages/{messageId} {
+      // Backend only - all access via API with auth
+      allow read, write: if false;
+    }
+
     // ============ POSTS COLLECTION (Optional - for future content) ============
     match /posts/{postId} {
       // Anyone authenticated can read published posts

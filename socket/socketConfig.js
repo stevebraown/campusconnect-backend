@@ -1,4 +1,6 @@
 import { Server } from 'socket.io';
+import { verifyToken } from '../utils/jwt.js';
+import { getConversationById, canAccessConversation } from '../services/chatService.js';
 
 /**
  * Initialize Socket.io server
@@ -19,6 +21,21 @@ export const initializeSocket = (httpServer) => {
 
   console.log('🔌 Socket.io initialized');
 
+  // Auth middleware: require valid JWT on connection
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token;
+    if (!token) {
+      return next(new Error('Authentication required'));
+    }
+    try {
+      const decoded = verifyToken(token);
+      socket.user = { uid: decoded.uid, email: decoded.email || '' };
+      return next();
+    } catch (err) {
+      return next(new Error('Invalid or expired token'));
+    }
+  });
+
   // Track connected users
   const connectedUsers = new Map();
   const userSockets = new Map(); // userId -> Set(socketId)
@@ -26,83 +43,134 @@ export const initializeSocket = (httpServer) => {
 
   // Connection event
   io.on('connection', (socket) => {
-    console.log(`✅ User connected: ${socket.id}`);
+    console.log(`✅ User connected: ${socket.id} (uid: ${socket.user?.uid || '?'})`);
 
-    // Store user info
+    // Store user info - userId comes from JWT only, never from client
     socket.on('user:register', (userData) => {
+      const userId = socket.user?.uid;
+      if (!userId) {
+        console.warn('user:register ignored: socket not authenticated');
+        return;
+      }
       connectedUsers.set(socket.id, {
-        userId: userData.userId,
-        username: userData.username,
+        userId,
+        username: userData?.username || socket.user?.email || 'User',
         status: 'online',
         connectedAt: new Date().toISOString(),
       });
 
-      // Map userId to socket
-      if (userData.userId) {
-        const set = userSockets.get(userData.userId) || new Set();
-        set.add(socket.id);
-        userSockets.set(userData.userId, set);
-      }
-      
-      console.log(`👤 User registered: ${userData.username} (${socket.id})`);
-      
+      const set = userSockets.get(userId) || new Set();
+      set.add(socket.id);
+      userSockets.set(userId, set);
+
+      console.log(`👤 User registered: ${userData?.username || userId} (${socket.id})`);
+
       // Broadcast user online status
       io.emit('user:status', {
-        userId: userData.userId,
+        userId,
         status: 'online',
       });
     });
 
-    // User typing event
+    // User typing event – use authenticated identity only
     socket.on('chat:typing', (data) => {
-      socket.broadcast.emit('chat:user-typing', {
-        userId: data.userId,
-        username: data.username,
-        isTyping: data.isTyping,
-      });
-    });
-
-    // Send message event
-    socket.on('chat:send-message', (message) => {
-      // Broadcast message to all users
-      io.emit('chat:new-message', {
-        id: Date.now(),
-        userId: message.userId,
-        username: message.username,
-        text: message.text,
-        timestamp: new Date().toISOString(),
-      });
-      
-      console.log(`💬 Message from ${message.username}: ${message.text}`);
-    });
-
-    // Location update event (for GPS features)
-    socket.on('location:update', (locationData) => {
       const user = connectedUsers.get(socket.id);
-      if (user) {
-        user.location = locationData;
-        
-        // Notify nearby users (placeholder logic)
-        socket.broadcast.emit('location:user-nearby', {
-          userId: user.userId,
-          username: user.username,
-          location: locationData,
-        });
+      const userId = user?.userId ?? socket.user?.uid;
+      if (!userId) return;
+      socket.broadcast.emit('chat:user-typing', {
+        userId,
+        username: user?.username ?? socket.user?.email ?? 'User',
+        isTyping: data?.isTyping ?? false,
+      });
+    });
+
+    // Chat: join conversation room (for real-time message delivery) – uses JWT-derived identity
+    socket.on('chat:join-conversation', async (data, callback) => {
+      const user = connectedUsers.get(socket.id);
+      const userId = user?.userId ?? socket.user?.uid;
+      if (!userId) {
+        if (typeof callback === 'function') callback({ ok: false, error: 'Not authenticated' });
+        return;
+      }
+      const conversationId = data?.conversationId;
+      if (!conversationId) {
+        if (typeof callback === 'function') callback({ ok: false, error: 'conversationId required' });
+        return;
+      }
+      try {
+        const conversation = await getConversationById(conversationId);
+        if (!conversation) {
+          if (typeof callback === 'function') callback({ ok: false, error: 'Conversation not found' });
+          return;
+        }
+        const allowed = await canAccessConversation(conversation, userId);
+        if (!allowed) {
+          if (typeof callback === 'function') callback({ ok: false, error: 'Access denied' });
+          return;
+        }
+        const room = `conv:${conversationId}`;
+        socket.join(room);
+        if (typeof callback === 'function') callback({ ok: true, room });
+      } catch (err) {
+        console.error('chat:join-conversation error:', err);
+        if (typeof callback === 'function') callback({ ok: false, error: 'Server error' });
       }
     });
 
-    // Event update (real-time event notifications)
-    socket.on('event:update', (eventData) => {
-      io.emit('event:updated', eventData);
-      console.log(`📅 Event updated: ${eventData.eventId}`);
+    // Chat: leave conversation room
+    socket.on('chat:leave-conversation', (data) => {
+      const conversationId = data?.conversationId;
+      if (conversationId) {
+        socket.leave(`conv:${conversationId}`);
+      }
     });
 
-    // Match notification
+    // Send message event (legacy global chat) – use authenticated identity only
+    socket.on('chat:send-message', (message) => {
+      const user = connectedUsers.get(socket.id);
+      const userId = user?.userId ?? socket.user?.uid;
+      if (!userId) return;
+      const content = typeof message?.text === 'string' ? message.text : '';
+      if (!content.trim()) return;
+      io.emit('chat:new-message', {
+        id: Date.now(),
+        userId,
+        username: user?.username ?? socket.user?.email ?? 'User',
+        text: content,
+        timestamp: new Date().toISOString(),
+      });
+      console.log(`💬 Message from ${user?.username ?? userId}: ${content}`);
+    });
+
+    // Location update event (for GPS features) – uses user from JWT-derived registration
+    socket.on('location:update', (locationData) => {
+      const user = connectedUsers.get(socket.id);
+      if (!user?.userId) return;
+      user.location = locationData;
+      socket.broadcast.emit('location:user-nearby', {
+        userId: user.userId,
+        username: user.username,
+        location: locationData,
+      });
+    });
+
+    // Event update (real-time event notifications) – inject source from authenticated user
+    socket.on('event:update', (eventData) => {
+      const userId = socket.user?.uid;
+      io.emit('event:updated', {
+        ...eventData,
+        sourceUserId: userId ?? null,
+      });
+      console.log(`📅 Event updated: ${eventData?.eventId} (source: ${userId ?? '?'})`);
+    });
+
+    // Match notification – use authenticated identity; backend should emit via io.userSockets
     socket.on('match:new', (matchData) => {
-      // Send to specific user (in real implementation)
+      const userId = socket.user?.uid;
+      if (!userId) return;
       io.emit('match:notification', {
-        matchId: matchData.matchId,
-        userId: matchData.userId,
+        matchId: matchData?.matchId ?? null,
+        userId,
         message: 'You have a new match!',
       });
     });

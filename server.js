@@ -1,3 +1,4 @@
+console.log('JWT_SECRET loaded:', process.env.JWT_SECRET ? 'YES' : 'NO');
 // Backend API server and Socket.io host
 // Load environment variables FIRST
 import dotenv from 'dotenv';
@@ -20,6 +21,7 @@ import helpAIRoutes from './routes/help-ai.routes.js';
 // AI onboarding and safety routes (campusconnect-ai integration).
 import onboardingRoutes from './routes/onboarding.routes.js';
 import safetyRoutes from './routes/safety.routes.js';
+import chatRoutes from './routes/chat.routes.js';
 
 // Initialize Express app
 const app = express();
@@ -90,6 +92,7 @@ app.use('/api/help/ai', helpAIRoutes);
 // AI-driven onboarding and safety endpoints (students only).
 app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/safety', safetyRoutes);
+app.use('/api/chat', chatRoutes);
 
 // 404 handler
 app.use((req, res) => {
