@@ -1,11 +1,12 @@
 // Chat and messaging routes
 import express from 'express';
 import { firestore } from '../config/firebaseAdmin.js';
+import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler, sendSuccess, sendError } from '../middleware/errorHandler.js';
 import { validateBody, validateQuery, validateParams } from '../middleware/validation.js';
 import { getUserProfile } from '../lib/user-helpers.js';
-import { canAccessConversation } from '../services/chatService.js';
+import { canAccessConversation, getParticipantsForConversation } from '../services/chatService.js';
 
 const router = express.Router();
 const conversationsRef = firestore.collection('conversations');
@@ -94,12 +95,14 @@ router.get(
 
     const paginated = allConvs.slice(offsetNum, offsetNum + limitNum);
 
-    // Enrich with display names
+    // Enrich with display names and unreadCount (from participantReads subcollection)
     const enriched = await Promise.all(
-      paginated.map(async (c) => ({
-        ...c,
-        name: await getConversationName(c, userId),
-      }))
+      paginated.map(async (c) => {
+        const name = await getConversationName(c, userId);
+        const readDoc = await conversationsRef.doc(c.id).collection('participantReads').doc(userId).get();
+        const unreadCount = readDoc.exists ? (readDoc.data().unreadCount ?? 0) : 0;
+        return { ...c, name, unreadCount };
+      })
     );
 
     return sendSuccess(res, {
@@ -224,7 +227,9 @@ router.get(
     const allowed = await canAccessConversation(conversation, userId);
     if (!allowed) return sendError(res, 403, 'Access denied');
     const name = await getConversationName(conversation, userId);
-    return sendSuccess(res, { conversation: { ...conversation, name } });
+    const readDoc = await conversationsRef.doc(id).collection('participantReads').doc(userId).get();
+    const unreadCount = readDoc.exists ? (readDoc.data().unreadCount ?? 0) : 0;
+    return sendSuccess(res, { conversation: { ...conversation, name, unreadCount } });
   })
 );
 
@@ -324,6 +329,20 @@ router.post(
       updatedAt: now,
     });
 
+    // Increment unread for all participants except sender
+    const participants = await getParticipantsForConversation(conversation);
+    const participantReadsRef = conversationsRef.doc(id).collection('participantReads');
+    await Promise.all(
+      participants
+        .filter((uid) => uid !== userId)
+        .map((uid) =>
+          participantReadsRef.doc(uid).set(
+            { unreadCount: FieldValue.increment(1) },
+            { merge: true }
+          )
+        )
+    );
+
     // Emit via Socket.io for real-time delivery
     const io = req.app.get('io');
     if (io) {
@@ -356,8 +375,11 @@ router.post(
     const allowed = await canAccessConversation(conversation, userId);
     if (!allowed) return sendError(res, 403, 'Access denied');
 
-    // Optional: update lastReadAt in a participantReads subcollection
-    // For now we just acknowledge - unread can be computed client-side from lastMessageAt
+    // Reset unread for this user and conversation
+    await conversationsRef.doc(id).collection('participantReads').doc(userId).set(
+      { unreadCount: 0 },
+      { merge: true }
+    );
     return sendSuccess(res, { read: true });
   })
 );
@@ -404,7 +426,9 @@ router.get(
       conversation = { id: doc.id, ...doc.data() };
     }
     const name = await getConversationName(conversation, userId);
-    return sendSuccess(res, { conversation: { ...conversation, name } });
+    const readDoc = await conversationsRef.doc(conversation.id).collection('participantReads').doc(userId).get();
+    const unreadCount = readDoc.exists ? (readDoc.data().unreadCount ?? 0) : 0;
+    return sendSuccess(res, { conversation: { ...conversation, name, unreadCount } });
   })
 );
 
@@ -448,7 +472,9 @@ router.get(
       conversation = { id: convDoc.id, ...convDoc.data() };
     }
     const name = await getConversationName(conversation, currentUserId);
-    return sendSuccess(res, { conversation: { ...conversation, name } });
+    const readDoc = await conversationsRef.doc(conversation.id).collection('participantReads').doc(currentUserId).get();
+    const unreadCount = readDoc.exists ? (readDoc.data().unreadCount ?? 0) : 0;
+    return sendSuccess(res, { conversation: { ...conversation, name, unreadCount } });
   })
 );
 
