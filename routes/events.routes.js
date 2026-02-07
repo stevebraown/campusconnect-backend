@@ -11,6 +11,25 @@ import { runAiGraph } from '../services/aiServiceClient.js';
 const router = express.Router();
 const eventsRef = firestore.collection('events');
 const profilesRef = firestore.collection('profiles');
+const usersRef = firestore.collection('users');
+
+/** Emit socket event to a specific user's sockets (JWT-derived userId only) */
+const emitToUser = (io, userSockets, userId, eventName, payload) => {
+  const sids = userSockets?.get(userId);
+  if (sids && sids.size > 0) {
+    for (const sid of sids) {
+      io.to(sid).emit(eventName, payload);
+    }
+  }
+};
+
+/** Emit to all connected users (for event broadcasts) */
+const emitToAllUsers = (io, eventName, payload) => {
+  if (!io?.userSockets) return;
+  for (const userId of io.userSockets.keys()) {
+    emitToUser(io, io.userSockets, userId, eventName, payload);
+  }
+};
 
 const EVENT_STATUS = {
   PENDING: 'pending',
@@ -123,8 +142,30 @@ router.post('/',
     };
 
     const docRef = await eventsRef.add(eventData);
-    
-    return sendSuccess(res, { id: docRef.id, ...eventData }, 201);
+    const eventId = docRef.id;
+
+    // Emit real-time notification to all connected users (JWT-derived identities only)
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const [profileSnap, userSnap] = await Promise.all([
+        profilesRef.doc(userId).get(),
+        usersRef.doc(userId).get(),
+      ]);
+      const profileData = profileSnap?.exists ? profileSnap.data() : {};
+      const userData = userSnap?.exists ? userSnap.data() : {};
+      const createdByName = profileData.name || profileData.displayName || userData.name || userData.email || 'Unknown';
+
+      const payload = {
+        eventId,
+        title: eventData.title,
+        communityId: eventData.communityId || null,
+        startsAt: eventData.startTime,
+        createdByName,
+      };
+      emitToAllUsers(io, 'event:created', payload);
+    }
+
+    return sendSuccess(res, { id: eventId, ...eventData }, 201);
   })
 );
 
@@ -265,10 +306,23 @@ router.patch('/:id/approve',
       return sendError(res, 'Event not found', 404);
     }
 
+    const data = doc.data();
     await docRef.update({
       status: EVENT_STATUS.APPROVED,
       updatedAt: new Date().toISOString(),
     });
+
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const payload = {
+        eventId: id,
+        title: data.title,
+        communityId: data.communityId || null,
+        startsAt: data.startTime,
+        updatedFields: { status: EVENT_STATUS.APPROVED },
+      };
+      emitToAllUsers(io, 'event:updated', payload);
+    }
 
     return sendSuccess(res, { id, status: EVENT_STATUS.APPROVED });
   })
@@ -301,7 +355,20 @@ router.patch('/:id/reject',
       updateData.rejectionReason = reason.trim();
     }
 
+    const data = doc.data();
     await docRef.update(updateData);
+
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const payload = {
+        eventId: id,
+        title: data.title,
+        communityId: data.communityId || null,
+        startsAt: data.startTime,
+        updatedFields: { status: EVENT_STATUS.REJECTED, ...(updateData.rejectionReason && { rejectionReason: updateData.rejectionReason }) },
+      };
+      emitToAllUsers(io, 'event:updated', payload);
+    }
 
     return sendSuccess(res, { id, status: EVENT_STATUS.REJECTED });
   })
@@ -331,11 +398,24 @@ router.post('/:id/rsvp',
       return sendSuccess(res, { id, message: 'Already RSVP\'d', isRSVPd: true });
     }
 
+    const data = doc.data();
     await docRef.update({
       attendees: FieldValue.arrayUnion(userId),
       attendeesCount: FieldValue.increment(1),
       updatedAt: new Date().toISOString(),
     });
+
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const payload = {
+        eventId: id,
+        title: data.title,
+        communityId: data.communityId || null,
+        startsAt: data.startTime,
+        updatedFields: { attendees: 'added' },
+      };
+      emitToAllUsers(io, 'event:updated', payload);
+    }
 
     return sendSuccess(res, { id, message: 'Successfully RSVP\'d to event', isRSVPd: true });
   })
@@ -361,11 +441,24 @@ router.post('/:id/withdraw',
       return sendSuccess(res, { id, message: 'Not RSVP\'d', isRSVPd: false });
     }
 
+    const data = doc.data();
     await docRef.update({
       attendees: FieldValue.arrayRemove(userId),
       attendeesCount: FieldValue.increment(-1),
       updatedAt: new Date().toISOString(),
     });
+
+    const io = req.app.get('io');
+    if (io?.userSockets) {
+      const payload = {
+        eventId: id,
+        title: data.title,
+        communityId: data.communityId || null,
+        startsAt: data.startTime,
+        updatedFields: { attendees: 'removed' },
+      };
+      emitToAllUsers(io, 'event:updated', payload);
+    }
 
     return sendSuccess(res, { id, message: 'Successfully withdrew RSVP', isRSVPd: false });
   })
