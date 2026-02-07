@@ -4,6 +4,7 @@ import { firestore } from '../config/firebaseAdmin.js';
 import { FieldValue } from 'firebase-admin/firestore';
 import { requireAuth } from '../middleware/auth.js';
 import { asyncHandler, sendSuccess, sendError } from '../middleware/errorHandler.js';
+import { runAiGraph } from '../services/aiServiceClient.js';
 import { validateBody, validateQuery, validateParams } from '../middleware/validation.js';
 import { getUserProfile } from '../lib/user-helpers.js';
 import { canAccessConversation, getParticipantsForConversation } from '../services/chatService.js';
@@ -475,6 +476,76 @@ router.get(
     const readDoc = await conversationsRef.doc(conversation.id).collection('participantReads').doc(currentUserId).get();
     const unreadCount = readDoc.exists ? (readDoc.data().unreadCount ?? 0) : 0;
     return sendSuccess(res, { conversation: { ...conversation, name, unreadCount } });
+  })
+);
+
+// Prompt hint for icebreakers (configurable in code)
+const ICEBREAKER_MESSAGE = 'Suggest 3 short, campus-friendly icebreakers to start this conversation.';
+
+/**
+ * POST /api/chat/assistant
+ * Get suggested icebreakers or replies from chat_assistant graph (campusconnect-ai)
+ */
+router.post(
+  '/assistant',
+  requireAuth,
+  validateBody({
+    action: {
+      type: 'string',
+      required: true,
+      validator: (v) =>
+        ['suggest_icebreakers', 'suggest_replies'].includes(v) ||
+        'action must be suggest_icebreakers or suggest_replies',
+    },
+    conversation_id: { type: 'string', required: false },
+    style: { type: 'string', required: false },
+  }),
+  asyncHandler(async (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    const authToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    const userId = req.user.uid;
+    const tenantId = req.user?.data?.tenantId || null;
+    const { action, conversation_id: conversationId, style } = req.body || {};
+
+    const graphAction = 'draft_reply';
+    const message =
+      action === 'suggest_icebreakers'
+        ? ICEBREAKER_MESSAGE
+        : (style || 'casual and friendly');
+
+    try {
+      const aiResponse = await runAiGraph({
+        graph: 'chat_assistant',
+        input: {
+          user_id: userId,
+          tenant_id: tenantId,
+          auth_token: authToken,
+          action: graphAction,
+          conversation_id: conversationId || '',
+          message,
+        },
+      });
+
+      const data = aiResponse?.data || {};
+      const draftReply = data.draft_reply;
+
+      let suggestions = [];
+      if (typeof draftReply === 'string') {
+        suggestions = [draftReply];
+      } else if (Array.isArray(draftReply)) {
+        suggestions = draftReply.map((s) => (typeof s === 'string' ? s : String(s)));
+      } else if (draftReply && typeof draftReply === 'object') {
+        const arr = draftReply.suggestions || draftReply.options || Object.values(draftReply);
+        suggestions = Array.isArray(arr) ? arr.map((s) => (typeof s === 'string' ? s : String(s))) : [String(draftReply)];
+      } else if (data.error) {
+        return sendError(res, 502, 'Chat assistant unavailable');
+      }
+
+      return sendSuccess(res, { suggestions });
+    } catch (err) {
+      console.error('Chat assistant error:', err);
+      return sendError(res, 502, 'Chat assistant unavailable');
+    }
   })
 );
 

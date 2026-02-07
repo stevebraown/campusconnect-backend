@@ -398,7 +398,6 @@ router.post('/:id/rsvp',
       return sendSuccess(res, { id, message: 'Already RSVP\'d', isRSVPd: true });
     }
 
-    const data = doc.data();
     await docRef.update({
       attendees: FieldValue.arrayUnion(userId),
       attendeesCount: FieldValue.increment(1),
@@ -441,7 +440,6 @@ router.post('/:id/withdraw',
       return sendSuccess(res, { id, message: 'Not RSVP\'d', isRSVPd: false });
     }
 
-    const data = doc.data();
     await docRef.update({
       attendees: FieldValue.arrayRemove(userId),
       attendeesCount: FieldValue.increment(-1),
