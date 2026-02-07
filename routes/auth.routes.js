@@ -22,6 +22,37 @@ const adminsRef = firestore.collection('admins');
 
 const sendError = (res, status, message) => res.status(status).json({ success: false, error: message });
 
+// Simple in-memory rate limiter for auth routes.
+// This mitigates brute-force attacks by limiting repeated attempts per IP over a time window.
+const createRateLimiter = ({ windowMs, maxAttempts }) => {
+  const hits = new Map();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = req.ip || 'unknown';
+    const entry = hits.get(key) || { count: 0, first: now };
+
+    if (now - entry.first > windowMs) {
+      entry.count = 0;
+      entry.first = now;
+    }
+
+    entry.count += 1;
+    hits.set(key, entry);
+
+    if (entry.count > maxAttempts) {
+      return sendError(res, 429, 'Too many authentication attempts. Please try again later.');
+    }
+
+    return next();
+  };
+};
+
+const authRateLimit = createRateLimiter({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  maxAttempts: 20, // per IP per window across auth endpoints
+});
+
 const callFirebaseAuth = async (path, body) => {
   if (!FIREBASE_API_KEY) {
     throw new Error('FIREBASE_API_KEY is missing');
@@ -50,7 +81,7 @@ if (adminEmails.length > 0) {
   console.warn('⚠️ ADMIN_EMAILS is empty or not set. No emails will be auto-promoted to admin.');
 }
 
-router.post('/register', async (req, res) => {
+router.post('/register', authRateLimit, async (req, res) => {
   try {
     const { email, password, name } = req.body || {};
     if (!email || !password) return sendError(res, 400, 'email and password are required');
@@ -113,7 +144,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post('/login', authRateLimit, async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password) return sendError(res, 400, 'email and password are required');
@@ -180,7 +211,7 @@ router.post('/logout', requireAuth, async (req, res) => {
   return res.json({ success: true });
 });
 
-router.post('/forgot-password', async (req, res) => {
+router.post('/forgot-password', authRateLimit, async (req, res) => {
   try {
     const { email } = req.body || {};
     if (!email) return sendError(res, 400, 'email is required');

@@ -220,13 +220,14 @@ router.patch('/:id/location', requireAuth, requireOwnership('id'), async (req, r
   try {
     const userId = req.params.id;
     
-    // Debug logging
+    // Debug logging with minimal payload details to protect location privacy.
     console.log('📍 Location update request received:', {
       method: req.method,
       path: req.path,
       route: req.route?.path,
       userId,
-      body: req.body,
+      hasLat: typeof req.body?.lat !== 'undefined',
+      hasLng: typeof req.body?.lng !== 'undefined',
     });
 
     const { lat, lng } = req.body || {};
@@ -245,11 +246,15 @@ router.patch('/:id/location', requireAuth, requireOwnership('id'), async (req, r
 
     // Geofence enforcement - check if geofencing is enabled first
     const geofenceSettings = await getGeofenceSettings();
-    console.log('📍 Geofence settings:', { enabled: geofenceSettings.enabled, center: [geofenceSettings.centerLat, geofenceSettings.centerLng], radius: geofenceSettings.radiusMeters });
+    // Log geofence configuration without precise coordinates to reduce sensitive data in logs.
+    console.log('📍 Geofence settings:', {
+      enabled: geofenceSettings.enabled,
+      radius: geofenceSettings.radiusMeters,
+    });
     
     if (geofenceSettings.enabled) {
       const insideCampus = await pointInsideGeofence(coords.lat, coords.lng);
-      console.log('📍 Geofence check (enabled):', { lat: coords.lat, lng: coords.lng, insideCampus });
+      console.log('📍 Geofence check (enabled):', { insideCampus });
       if (!insideCampus) {
         console.log('❌ Location outside geofence');
         return res.status(400).json({ error: 'Location outside campus geofence' });

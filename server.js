@@ -36,8 +36,34 @@ const io = initializeSocket(httpServer);
 // Make io accessible in routes
 app.set('io', io);
 
+// CORS configuration: restrict origins while allowing CLI tools (no Origin header).
+// This improves security by preventing arbitrary websites from calling the API with user credentials.
+const rawCorsOrigins = process.env.CORS_ORIGINS;
+const defaultCorsOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://localhost:5001',
+];
+const allowedCorsOrigins = rawCorsOrigins
+  ? rawCorsOrigins.split(',').map((o) => o.trim()).filter(Boolean)
+  : defaultCorsOrigins;
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Allow requests with no origin header (curl, server-to-server, health checks).
+    if (!origin) {
+      return callback(null, true);
+    }
+    if (allowedCorsOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('CORS: Origin not allowed by configuration'));
+  },
+  credentials: true,
+};
+
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -131,4 +157,3 @@ httpServer.listen(PORT, () => {
   Environment: ${process.env.NODE_ENV || 'development'}
   `);
 });
-

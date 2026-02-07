@@ -8,10 +8,30 @@ import { getConversationById, canAccessConversation } from '../services/chatServ
  * @returns {Object} - Socket.io server instance
  */
 export const initializeSocket = (httpServer) => {
+  // Socket.io CORS configuration: mirror HTTP CORS and restrict browser origins.
+  // This reduces the risk of unauthorized websites opening WebSocket sessions.
+  const rawSocketOrigins = process.env.SOCKET_ORIGINS || process.env.CORS_ORIGINS;
+  const defaultSocketOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:5001',
+  ];
+  const allowedSocketOrigins = rawSocketOrigins
+    ? rawSocketOrigins.split(',').map((o) => o.trim()).filter(Boolean)
+    : defaultSocketOrigins;
+
   const io = new Server(httpServer, {
     cors: {
-      // Allow LAN access from any origin during local dev
-      origin: '*',
+      origin(origin, callback) {
+        // Allow non-browser clients without an Origin header (e.g., native apps, CLI tools).
+        if (!origin) {
+          return callback(null, true);
+        }
+        if (allowedSocketOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+        return callback(new Error('Socket.io CORS: Origin not allowed by configuration'));
+      },
       methods: ['GET', 'POST'],
       credentials: false,
     },

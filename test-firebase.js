@@ -8,13 +8,11 @@ console.log('=== Firebase Configuration Debug ===');
 console.log('FIREBASE_PROJECT_ID:', process.env.FIREBASE_PROJECT_ID);
 console.log('FIREBASE_CLIENT_EMAIL:', process.env.FIREBASE_CLIENT_EMAIL);
 console.log('FIREBASE_PRIVATE_KEY length:', process.env.FIREBASE_PRIVATE_KEY?.length);
-console.log('FIREBASE_PRIVATE_KEY first 50 chars:', process.env.FIREBASE_PRIVATE_KEY?.substring(0, 50));
-console.log('FIREBASE_PRIVATE_KEY last 50 chars:', process.env.FIREBASE_PRIVATE_KEY?.substring(process.env.FIREBASE_PRIVATE_KEY.length - 50));
+// Intentionally avoid logging any portion of the private key to protect secrets.
 
 const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 console.log('\n=== After Replace ===');
 console.log('Private key length:', privateKey?.length);
-console.log('Private key first 50 chars:', privateKey?.substring(0, 50));
 console.log('Private key has actual newlines:', privateKey?.includes('\n'));
 
 try {
@@ -35,6 +33,6 @@ try {
   process.exit(0);
 } catch (error) {
   console.error('❌ Error:', error.message);
-  console.error('Full error:', error);
+  // Avoid logging the full error object to reduce the risk of leaking sensitive details.
   process.exit(1);
 }

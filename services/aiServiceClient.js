@@ -19,6 +19,9 @@ const normalizeUrl = (url) => {
 
 const AI_SERVICE_URL = normalizeUrl(process.env.AI_SERVICE_URL || 'http://localhost:8000');
 const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN || '';
+// Configurable timeout for AI service requests to protect backend availability.
+// This ensures hung or slow AI calls do not tie up Node.js workers indefinitely.
+const AI_SERVICE_TIMEOUT_MS = Number(process.env.AI_SERVICE_TIMEOUT_MS || '15000');
 
 /**
  * Run a graph on the CampusConnect AI service.
@@ -40,12 +43,33 @@ export const runAiGraph = async (request) => {
     headers.Authorization = `Bearer ${AI_SERVICE_TOKEN}`;
   }
 
-  // AI-driven call to the external FastAPI service.
-  const response = await fetch(`${AI_SERVICE_URL}/run-graph`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(request),
-  });
+  // AI-driven call to the external FastAPI service with an explicit timeout.
+  // AbortController ensures we fail fast and surface a clear 504-style error to routes.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort();
+  }, AI_SERVICE_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(`${AI_SERVICE_URL}/run-graph`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      const timeoutError = new Error(
+        `AI service request timed out after ${AI_SERVICE_TIMEOUT_MS}ms`
+      );
+      timeoutError.status = 504;
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   // Parse response body safely for both success and error cases.
   const rawText = await response.text();
