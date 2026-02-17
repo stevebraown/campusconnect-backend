@@ -27,3 +27,4 @@ Thumbs.db
 dist
 coverage
 .nyc_output
+config/serviceAccountKey.json
