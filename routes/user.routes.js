@@ -10,6 +10,7 @@ const profilesRef = firestore.collection('profiles');
 const usersRef = firestore.collection('users');
 const matchesRef = firestore.collection('matches');
 const adminRef = firestore.collection('admin');
+const connectionsRef = firestore.collection('connections');
 
 // Default geofence settings (fallback)
 const DEFAULT_GEOFENCE = {
@@ -118,6 +119,65 @@ router.get('/me/settings', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Get settings error:', err);
     return res.status(500).json({ success: false, error: 'Failed to load settings' });
+  }
+});
+
+// Get accepted connections for current user (basic profile info)
+router.get('/me/connections', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+
+    const [fromSnap, toSnap] = await Promise.all([
+      connectionsRef.where('fromUserId', '==', uid).where('status', '==', 'accepted').get(),
+      connectionsRef.where('toUserId', '==', uid).where('status', '==', 'accepted').get(),
+    ]);
+
+    const raw = [
+      ...fromSnap.docs.map((d) => ({ id: d.id, ...d.data(), connectedUserId: d.data().toUserId })),
+      ...toSnap.docs.map((d) => ({ id: d.id, ...d.data(), connectedUserId: d.data().fromUserId })),
+    ];
+
+    const connectionByOtherId = {};
+    for (const c of raw) {
+      const otherId = c.connectedUserId;
+      if (!otherId || typeof otherId !== 'string' || otherId === uid) continue;
+      if (!connectionByOtherId[otherId]) {
+        connectionByOtherId[otherId] = c;
+      }
+    }
+
+    const otherUserIds = Object.keys(connectionByOtherId);
+
+    if (otherUserIds.length === 0) {
+      return res.json({ success: true, connections: [] });
+    }
+
+    const profileSnaps = await Promise.all(
+      otherUserIds.map((otherId) => profilesRef.doc(otherId).get())
+    );
+
+    const connections = profileSnaps.map((snap, index) => {
+      const otherId = otherUserIds[index];
+      const data = snap.exists ? snap.data() : {};
+      const conn = connectionByOtherId[otherId] || {};
+      return {
+        id: otherId,
+        userId: otherId,
+        name: data.name || data.displayName || '',
+        avatarUrl: data.avatarUrl || data.photoURL || '',
+        major: data.major || '',
+        course: data.course || data.major || '',
+        year: data.year || null,
+        interests: Array.isArray(data.interests) ? data.interests : [],
+        acceptedAt: conn.acceptedAt || null,
+        createdAt: conn.createdAt || null,
+      };
+    });
+
+    return res.json({ success: true, connections });
+  } catch (err) {
+    console.error('Get my connections error:', err);
+    return res.status(500).json({ success: false, error: 'Failed to load connections' });
   }
 });
 
